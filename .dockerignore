@@ -1,0 +1,24 @@
+# Go specific files
+/bin/
+/vendor/
+
+# Build files
+*.o
+*.a
+*.exe
+
+# Log files
+*.log
+
+# Temp files
+*.tmp
+*.swp
+*.swo
+
+# Config files
+*.env
+.env.*
+
+# Ignore database files
+/database/
+/database_data/
