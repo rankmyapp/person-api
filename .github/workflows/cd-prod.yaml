@@ -1,0 +1,148 @@
+name: CD [TAG]
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  sonarqube:
+    name: SonarQube Trigger
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checking out
+      uses: actions/checkout@master
+      with:
+        # Disabling shallow clone is recommended for improving relevancy of reporting
+        fetch-depth: 0
+    - name: SonarQube Scan
+      uses: kitabisa/sonarqube-action@v1.2.0
+      with:
+        host: ${{ secrets.SONARQUBE_HOST }}
+        login: ${{ secrets.SONARQUBE_TOKEN }}
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PRD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PRD }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Set env
+      run: |
+        echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV ;
+
+    - name: Build, tag, and push the image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: person-api
+      run: |
+        # Build a docker container and push it to ECR
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${RELEASE_VERSION} .
+        echo "Pushing image to ECR..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:${RELEASE_VERSION}
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:${RELEASE_VERSION}"
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PRD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PRD }}
+          aws-region: us-east-1
+
+      - name: Set env
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV ;
+          echo "REPOSITORY=$( echo ${GITHUB_REPOSITORY} | awk -F '/' '{print $2}')" >> $GITHUB_ENV ;
+      - name: Sed workflow
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          git clone "https://${TOKEN}@github.com/rankmyapp/helm-rank.git"
+          git config --global user.email ""
+          git config --global user.name "ArgoCD Workflows"
+          cd helm-rank/${REPOSITORY}
+          sed -i "s/^version:.*$/version: ${RELEASE_VERSION}/g" values-prd.yaml
+          git add values-prd.yaml
+          git commit -m "Bumped ${REPOSITORY} version to ${RELEASE_VERSION}"
+          git push origin master
+
+  send-failure-notification:
+    runs-on: ubuntu-latest
+    needs: [build, deploy]
+    if: ${{ always() && contains(needs.*.result, 'failure') }}
+    steps:
+      - name: Set ENVs
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV ;
+          echo "REPOSITORY=$( echo ${GITHUB_REPOSITORY} | awk -F '/' '{print $2}')" >> $GITHUB_ENV ;
+
+      - name: Send Discord Notification
+        uses: tsickert/discord-webhook@v5.3.0
+        with:
+          webhook-url: ${{ secrets.DEPLOY_ALERTS_WEBHOOK_URL }}
+          content: '**DEPLOY** :x: : ${{ env.REPOSITORY }} ${{ env.RELEASE_VERSION }}'
+          username: 'SquirtleBot'
+          avatar-url: 'https://i.imgur.com/mBigsPd.png'
+
+  send-successful-notification:
+    runs-on: ubuntu-latest
+    needs: [build, deploy]
+    steps:
+      - name: Set ENVs
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV ;
+          echo "REPOSITORY=$( echo ${GITHUB_REPOSITORY} | awk -F '/' '{print $2}')" >> $GITHUB_ENV ;
+
+      - name: Sleuth deploy notification
+        run: |
+          curl -X POST -d api_key=${{ secrets.SLEUTH_API_KEY }} -d environment=production -d sha=${GITHUB_SHA} https://app.sleuth.io/api/1/deployments/rankmyapp/${REPOSITORY}/register_deploy 
+
+      - name: Install New Relic CLI
+        run: |
+          curl -L https://download.newrelic.com/install/newrelic-cli/scripts/install.sh | sudo bash
+          sudo sh -c "echo 'export PATH=$PATH:/usr/local/bin' >> /etc/profile.d/newrelic-cli.sh"
+          source /etc/profile.d/newrelic-cli.sh
+          newrelic profile add --profile actions --region us --apiKey ${{ secrets.NEW_RELIC_API_KEY }} --accountId 2952265 --licenseKey ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+          newrelic profiles default --profile actions
+
+      - name: Set ENTITY_GUID
+        run: |
+          echo "ENTITY_GUID=$(newrelic apm application search --accountId=2952265 --name=${REPOSITORY}-prod | jq -r '.[].guid' | head -n 1)" >> $GITHUB_ENV ;
+
+      - name: New Relic Application Deployment Marker
+        uses: newrelic/deployment-marker-action@v2.3.0
+        with:
+          apiKey: ${{ secrets.NEW_RELIC_API_KEY }}
+          guid: "${{ env.ENTITY_GUID }}"
+          version: "${{ env.RELEASE_VERSION }}"
+          user: "${{ github.actor }}"
+
+      - name: Send Discord Notification
+        uses: tsickert/discord-webhook@v5.3.0
+        with:
+          webhook-url: ${{ secrets.DEPLOY_ALERTS_WEBHOOK_URL }}
+          content: '**DEPLOY** :white_check_mark: : ${{ env.REPOSITORY }} ${{ env.RELEASE_VERSION }}'
+          username: 'SquirtleBot'
+          avatar-url: 'https://i.imgur.com/mBigsPd.png'
