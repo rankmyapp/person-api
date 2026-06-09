@@ -17,14 +17,14 @@ jobs:
     - name: SonarQube Scan
       uses: kitabisa/sonarqube-action@v1.2.0
       with:
-        host: ${{ secrets.SONARQUBE_HOST_DEV }}
-        login: ${{ secrets.SONARQUBE_TOKEN_DEV }}
+        host: ${{ secrets.SONARQUBE_HOST }}
+        login: ${{ secrets.SONARQUBE_TOKEN }}
     
     - name: Quality Gate
       uses: sonarsource/sonarqube-quality-gate-action@master
       env:
         timeout-minutes: 5
-        SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN_DEV }}
+        SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
         
   build:
     name: Build
